@@ -1,12 +1,12 @@
 {
-  "name": "style-master:-ai-personal-fashion-stylist",
+  "name": "style-master",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build",
-    "start": "node server.ts",
+    "start": "NODE_ENV=production tsx server.ts",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -14,14 +14,17 @@
     "express": "^5.3.0",
     "lucide-react": "^0.564.0",
     "react": "^19.2.4",
-    "react-dom": "^19.2.4"
+    "react-dom": "^19.2.4",
+    "tsx": "^4.23.15"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.0",
-    "tsx": "^4.23.15",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

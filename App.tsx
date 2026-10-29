@@ -45,6 +45,7 @@ const App: React.FC = () => {
   const [loadingStage, setLoadingStage] = useState<'advice' | 'image' | null>(null);
   const [result, setResult] = useState<StylingResult | null>(null);
   const [error, setError] = useState<React.ReactNode | null>(null);
+  const [imageFailed, setImageFailed] = useState(false);
 
   const t = (ko: string, en: string) => (lang === 'ko' ? ko : en);
 
@@ -88,6 +89,28 @@ const App: React.FC = () => {
     }
   };
 
+  // Height and weight are always stored in cm / kg. In Imperial mode the inputs show
+  // feet + inches and pounds and convert on the way in, so switching units never mixes them up.
+  const CM_PER_INCH = 2.54;
+  const LB_PER_KG = 2.20462;
+  const totalInches = Math.round(profile.height / CM_PER_INCH);
+  const heightFt = Math.floor(totalInches / 12);
+  const heightIn = totalInches % 12;
+  const weightLb = Math.round(profile.weight * LB_PER_KG);
+
+  const parseNum = (value: string) => {
+    const num = parseFloat(value);
+    return isNaN(num) || num < 0 ? 0 : num;
+  };
+  const setHeightImperial = (ft: number, inches: number) => {
+    setProfile(prev => ({ ...prev, height: Math.round((ft * 12 + inches) * CM_PER_INCH) }));
+  };
+  const setWeightImperial = (lb: number) => {
+    setProfile(prev => ({ ...prev, weight: Math.round((lb / LB_PER_KG) * 10) / 10 }));
+  };
+
+  const profileValid = profile.age > 0 && profile.height > 0 && profile.weight > 0;
+
   const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -113,56 +136,92 @@ const App: React.FC = () => {
       tpo: 'Business'
     });
     setError(null);
+    setImageFailed(false);
     setLoadingStage(null);
   };
 
   const backToSelection = () => {
     setResult(null);
     setError(null);
+    setImageFailed(false);
+  };
+
+  const showError = (err: any) => {
+    console.error("Styling Error Debug:", err);
+    const errorMessage = err?.message || "Unknown error";
+
+    if (errorMessage === 'DAILY_LIMIT') {
+      setError(
+        <div className="space-y-1">
+          <p className="font-bold">{t('오늘 사용 횟수를 모두 썼어요', 'Daily limit reached')}</p>
+          <p className="text-[11px] opacity-80">{t('내일 다시 이용해 주세요.', 'Please come back tomorrow.')}</p>
+        </div>
+      );
+    } else if (errorMessage.includes("503") || errorMessage.includes("high demand") || errorMessage.includes("UNAVAILABLE")) {
+      setError(
+        <div className="space-y-2">
+          <p className="font-bold flex items-center gap-2">
+            <Clock className="w-4 h-4 text-rose-500" />
+            {t("서버 혼잡 안내", "Server High Demand")}
+          </p>
+          <p className="text-[11px] opacity-90 leading-relaxed">
+            {t(
+              "현재 고화질 이미지 생성 모델의 사용자가 많아 서버가 일시적으로 응답하지 않습니다. 잠시 후 다시 시도해 주세요.",
+              "The high-quality image model is currently experiencing high demand. Please wait a few moments and try again."
+            )}
+          </p>
+        </div>
+      );
+    } else {
+      setError(
+        <div className="space-y-1">
+           <p className="font-bold">{t('분석 중 오류 발생', 'Analysis Failed')}</p>
+           <p className="text-[11px] opacity-80">{errorMessage}</p>
+        </div>
+      );
+    }
+  };
+
+  const retryImage = async () => {
+    if (loading || !result) return;
+    setError(null);
+    setImageFailed(false);
+    setLoading(true);
+    setLoadingStage('image');
+    try {
+      const imageUrl = await generateStylingImage(profile, result);
+      setResult(prev => prev ? { ...prev, imageUrl } : null);
+    } catch (err: any) {
+      setImageFailed(true);
+      showError(err);
+    } finally {
+      setLoading(false);
+      setLoadingStage(null);
+    }
   };
 
   const generateStyling = async () => {
-    if (loading) return;
+    if (loading || !profileValid) return;
     
     setError(null);
+    setImageFailed(false);
     setLoading(true);
+    let adviceReady = false;
 
     try {
       setLoadingStage('advice');
       const advice = await generateStylingAdvice(profile);
       setResult({ ...advice, imageUrl: null });
+      adviceReady = true;
 
       setLoadingStage('image');
       const imageUrl = await generateStylingImage(profile, advice);
       setResult(prev => prev ? { ...prev, imageUrl } : null);
       
     } catch (err: any) {
-      console.error("Styling Error Debug:", err);
-      const errorMessage = err.message || "Unknown error";
-      
-      if (errorMessage.includes("503") || errorMessage.includes("high demand") || errorMessage.includes("UNAVAILABLE")) {
-        setError(
-          <div className="space-y-2">
-            <p className="font-bold flex items-center gap-2">
-              <Clock className="w-4 h-4 text-rose-500" />
-              {t("서버 혼잡 안내", "Server High Demand")}
-            </p>
-            <p className="text-[11px] opacity-90 leading-relaxed">
-              {t(
-                "현재 고화질 이미지 생성 모델의 사용자가 많아 서버가 일시적으로 응답하지 않습니다. 잠시 후 다시 시도해 주세요.",
-                "The high-quality image model is currently experiencing high demand. Please wait a few moments and try again."
-              )}
-            </p>
-          </div>
-        );
-      } else {
-        setError(
-          <div className="space-y-1">
-             <p className="font-bold">{t('분석 중 오류 발생', 'Analysis Failed')}</p>
-             <p className="text-[11px] opacity-80">{errorMessage}</p>
-          </div>
-        );
-      }
+      // If the advice already arrived, only the image failed: keep the advice on screen.
+      if (adviceReady) setImageFailed(true);
+      showError(err);
     } finally {
       setLoading(false);
       setLoadingStage(null);
@@ -201,6 +260,7 @@ const App: React.FC = () => {
               ) : (
                 <div className="text-center px-10">
                   <p className="text-gray-400 text-sm mb-6 leading-relaxed">{t('정면 사진을 업로드하시면 더욱 정확한 분석이 가능합니다.', 'Uploading a front-facing photo ensures more accurate analysis.')}</p>
+                  <p className="text-gray-400 text-[11px] mb-6 leading-relaxed">{t('사진은 화보 생성을 위해 Google Gemini로 전송되며, 이 앱에는 저장되지 않습니다.', 'Your photo is sent to Google Gemini to create the image and is not stored by this app.')}</p>
                   <label className="bg-black text-white px-8 py-3 rounded-full text-sm font-bold cursor-pointer hover:bg-gray-800 transition-all shadow-xl shadow-black/10">
                     {t('사진 선택하기', 'Select Photo')}
                     <input type="file" className="hidden" accept="image/*" onChange={handlePhotoUpload} />
@@ -233,19 +293,36 @@ const App: React.FC = () => {
             </div>
             <div className="space-y-3">
               <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">
-                {t('키', 'Height')} <span className="text-[10px] opacity-60">({profile.unit === 'metric' ? 'cm' : 'ft'})</span>
+                {t('키', 'Height')} <span className="text-[10px] opacity-60">({profile.unit === 'metric' ? 'cm' : 'ft / in'})</span>
               </label>
-              <div className="relative">
-                <input type="number" step="0.1" value={profile.height || ''} onChange={(e) => handleNumericInput('height', e.target.value)} className="w-full bg-gray-100 border-none rounded-2xl px-5 py-4 focus:ring-2 focus:ring-black font-bold outline-none" />
-                <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-bold text-gray-300">{profile.unit === 'metric' ? 'cm' : 'ft'}</span>
-              </div>
+              {profile.unit === 'metric' ? (
+                <div className="relative">
+                  <input type="number" inputMode="numeric" value={profile.height || ''} onChange={(e) => handleNumericInput('height', e.target.value)} className="w-full bg-gray-100 border-none rounded-2xl px-5 py-4 focus:ring-2 focus:ring-black font-bold outline-none" />
+                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-bold text-gray-300">cm</span>
+                </div>
+              ) : (
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <input type="number" inputMode="numeric" value={heightFt || ''} onChange={(e) => setHeightImperial(parseNum(e.target.value), heightIn)} className="w-full bg-gray-100 border-none rounded-2xl px-4 py-4 focus:ring-2 focus:ring-black font-bold outline-none" />
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-bold text-gray-300">ft</span>
+                  </div>
+                  <div className="relative flex-1">
+                    <input type="number" inputMode="numeric" min={0} max={11} value={heightIn} onChange={(e) => setHeightImperial(heightFt, Math.min(11, parseNum(e.target.value)))} className="w-full bg-gray-100 border-none rounded-2xl px-4 py-4 focus:ring-2 focus:ring-black font-bold outline-none" />
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-bold text-gray-300">in</span>
+                  </div>
+                </div>
+              )}
             </div>
             <div className="space-y-3">
               <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">
                 {t('몸무게', 'Weight')} <span className="text-[10px] opacity-60">({profile.unit === 'metric' ? 'kg' : 'lb'})</span>
               </label>
               <div className="relative">
-                <input type="number" step="0.1" value={profile.weight || ''} onChange={(e) => handleNumericInput('weight', e.target.value)} className="w-full bg-gray-100 border-none rounded-2xl px-5 py-4 focus:ring-2 focus:ring-black font-bold outline-none" />
+                {profile.unit === 'metric' ? (
+                  <input type="number" step="0.1" inputMode="decimal" value={profile.weight || ''} onChange={(e) => handleNumericInput('weight', e.target.value)} className="w-full bg-gray-100 border-none rounded-2xl px-5 py-4 focus:ring-2 focus:ring-black font-bold outline-none" />
+                ) : (
+                  <input type="number" inputMode="numeric" value={weightLb || ''} onChange={(e) => setWeightImperial(parseNum(e.target.value))} className="w-full bg-gray-100 border-none rounded-2xl px-5 py-4 focus:ring-2 focus:ring-black font-bold outline-none" />
+                )}
                 <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-bold text-gray-300">{profile.unit === 'metric' ? 'kg' : 'lb'}</span>
               </div>
             </div>
@@ -286,7 +363,7 @@ const App: React.FC = () => {
             </div>
           </section>
 
-          <button disabled={loading} onClick={generateStyling} className={`w-full py-6 rounded-full bg-black text-white font-bold text-lg shadow-2xl shadow-black/30 hover:scale-[1.01] active:scale-[0.98] transition-all flex items-center justify-center gap-3 ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}>
+          <button disabled={loading || !profileValid} onClick={generateStyling} className={`w-full py-6 rounded-full bg-black text-white font-bold text-lg shadow-2xl shadow-black/30 hover:scale-[1.01] active:scale-[0.98] transition-all flex items-center justify-center gap-3 ${loading || !profileValid ? 'opacity-50 cursor-not-allowed' : ''}`}>
             {loading ? <><Loader2 className="w-5 h-5 animate-spin" /> {t('분석 중...', 'Analyzing...')}</> : <>{t('나만의 스타일 생성하기', 'Create My Style')} <ChevronRight className="w-5 h-5" /></>}
           </button>
 
@@ -302,6 +379,14 @@ const App: React.FC = () => {
           <div className="relative aspect-[9/16] bg-gray-100 overflow-hidden shadow-2xl ring-1 ring-black/5">
             {result.imageUrl ? (
               <img src={result.imageUrl} className="w-full h-full object-cover" alt="Editorial" />
+            ) : imageFailed ? (
+              <div className="w-full h-full flex flex-col items-center justify-center space-y-5 bg-white px-10 text-center">
+                <AlertCircle className="w-10 h-10 text-rose-400" />
+                <p className="text-sm font-bold text-gray-600">{t('화보 이미지를 만들지 못했어요', "Couldn't create the image")}</p>
+                <button onClick={retryImage} disabled={loading} className="relative z-10 px-8 py-3 rounded-full bg-black text-white text-sm font-bold flex items-center gap-2 hover:bg-gray-800 transition-all">
+                  <RefreshCcw className="w-4 h-4" /> {t('이미지 다시 만들기', 'Try Image Again')}
+                </button>
+              </div>
             ) : (
               <div className="w-full h-full flex flex-col items-center justify-center space-y-6 bg-white">
                 <Loader2 className="w-12 h-12 animate-spin text-black" />

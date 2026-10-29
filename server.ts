@@ -1,5 +1,4 @@
 import express from 'express';
-import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
@@ -8,6 +7,25 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT) || 3000;
+const IS_PROD = process.env.NODE_ENV === 'production';
+
+// Simple per-visitor daily limit so a shared link can't run up the Gemini bill.
+// Counts reset when the server restarts or the day changes. Set DAILY_LIMIT in the host's
+// environment settings to change it (default: 10 styling requests per visitor per day).
+const DAILY_LIMIT = Number(process.env.DAILY_LIMIT) || 10;
+const usage = new Map<string, { day: string; count: number }>();
+
+function checkDailyLimit(ip: string): boolean {
+  const day = new Date().toISOString().slice(0, 10);
+  const entry = usage.get(ip);
+  if (!entry || entry.day !== day) {
+    usage.set(ip, { day, count: 1 });
+    return true;
+  }
+  if (entry.count >= DAILY_LIMIT) return false;
+  entry.count += 1;
+  return true;
+}
 
 // Helper function for exponential backoff retry on server
 async function withRetry<T>(
@@ -40,7 +58,14 @@ async function withRetry<T>(
 }
 
 async function startServer() {
+  if (!process.env.GEMINI_API_KEY) {
+    console.error('GEMINI_API_KEY is not set. Add it to your environment (see README) before starting the server.');
+    process.exit(1);
+  }
+
   const app = express();
+  // Hosting services (Render, Cloud Run) sit behind a proxy; this makes req.ip the visitor's real address.
+  app.set('trust proxy', 1);
   app.use(express.json({ limit: '20mb' }));
 
   const ai = new GoogleGenAI({
@@ -59,6 +84,10 @@ async function startServer() {
       if (!profile) {
         return res.status(400).json({ error: 'Missing user profile' });
       }
+      // One "styling request" = advice + its image, so only the advice call is counted.
+      if (!checkDailyLimit(req.ip || 'unknown')) {
+        return res.status(429).json({ error: 'DAILY_LIMIT', limit: DAILY_LIMIT });
+      }
 
       const prompt = `
         You are 'Style Master', a legendary fashion designer and personal fashion consultant with 10 years of experience.
@@ -69,7 +98,7 @@ async function startServer() {
         User Profile:
         - Gender: ${profile.gender}
         - Age: ${profile.age}
-        - Height/Weight: ${profile.height}${profile.unit === 'metric' ? 'cm' : 'ft'} / ${profile.weight}${profile.unit === 'metric' ? 'kg' : 'lb'}
+        - Height/Weight: ${profile.height}cm / ${profile.weight}kg
         - Body Silhouette: ${profile.bodyType}
         - Situation (TPO): ${profile.tpo}
 
@@ -257,7 +286,9 @@ async function startServer() {
   });
 
   // Vite integration for development or static serving for production
-  if (process.env.NODE_ENV !== 'production') {
+  if (!IS_PROD) {
+    // Loaded only in development, so the production server doesn't need Vite installed at runtime.
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -265,7 +296,8 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     app.use(express.static(path.resolve(__dirname, 'dist')));
-    app.get('*', (req, res) => {
+    // Express 5 needs a named wildcard; the old '*' crashes the server at startup.
+    app.get('/{*splat}', (req, res) => {
       res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
     });
   }
